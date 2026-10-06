@@ -28,7 +28,7 @@ class Config:
     def default_values(self):
         return {
             "locations": "3400936",
-            "poll_interval": "60",
+            "poll_interval": "10",
             "stale_minutes": "10",
             "cot_type": "a-f-G-E-S-E",
             "cot_host": "0.0.0.0",
@@ -393,6 +393,7 @@ class StationManager:
         db = self.get_db()
 
         if not stations:
+            print("WARNING: no stations to send")
             return
 
         for station in stations:
@@ -407,11 +408,13 @@ class StationManager:
                     )
 
                 cot = make_cot(config, station, data)
+                print(f"[DEBUG] Sending CoT for {station['location_id']}, size={len(cot)} bytes")
                 conn.sendall(cot.encode("utf-8"))
                 print(f"CoT sent: openaq.{station['location_id']}")
 
             except Exception as exc:
                 print(f"ERROR updating station {station['location_id']}: {exc}")
+                raise
 
 
 def main():
@@ -445,23 +448,27 @@ def main():
         while True:
             try:
                 conn, addr = server.accept()
-                print(f"ATAK connection from {addr}")
+                print(f"[DEBUG] ATAK connection from {addr}")
                 with conn:
                     # Send immediately on connection
+                    print("[DEBUG] Sending initial CoT batch")
                     try:
                         manager.send_all(conn)
-                    except (BrokenPipeError, ConnectionResetError):
-                        print("ATAK disconnected after first send")
+                        print("[DEBUG] Initial CoT sent successfully")
+                    except (BrokenPipeError, ConnectionResetError) as e:
+                        print(f"[DEBUG] Connection closed during initial send: {e}")
                         continue
                     except Exception as exc:
-                        print(f"Error on first send: {exc}")
+                        print(f"[DEBUG] Error on initial send: {exc}")
                         continue
 
                     # Then continue polling
                     while True:
                         try:
-                            poll_interval = manager.get_config().get_int("poll_interval", 60)
+                            poll_interval = manager.get_config().get_int("poll_interval", 10)
+                            print(f"[DEBUG] Sleeping {poll_interval}s before next poll")
                             time.sleep(poll_interval)
+                            print(f"[DEBUG] Sending periodic CoT batch")
                             manager.send_all(conn)
                         except (BrokenPipeError, ConnectionResetError):
                             print("ATAK disconnected")

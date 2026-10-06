@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+
+# Minimal Taky CoT server used only for AQTAK air quality reports.
+RUN pip install --no-cache-dir taky && mkdir -p /var/taky /etc/taky
+
+EXPOSE 8087/tcp
+
+CMD ["taky", "-c", "/etc/taky/taky.conf"]

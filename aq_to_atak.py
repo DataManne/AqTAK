@@ -10,7 +10,6 @@ from xml.sax.saxutils import escape
 
 import requests
 
-# Configuration
 CONFIG_PATH = Path("/data/aqtak.conf")
 DEFAULT_CONFIG_RELOAD_SECONDS = 5
 
@@ -19,69 +18,32 @@ if not OPENAQ_API_KEY:
     raise RuntimeError("OPENAQ_API_KEY is not set in the environment")
 
 
-# AQI color mapping (China standard, 4-color simplified)
-# Maps AQI ranges to CoT type and visual description
-AQI_COLORS = {
-    "blue": {
-        "range": (0, 35),
-        "label": "Excellent",
-        "cot_type": "a-h-G-E-S",
-        "description": "Air quality is good; suitable for all outdoor activities"
-    },
-    "green": {
-        "range": (36, 75),
-        "label": "Good",
-        "cot_type": "a-h-G-E-S",
-        "description": "Air quality is acceptable; most people can engage in outdoor activities"
-    },
-    "yellow": {
-        "range": (76, 150),
-        "label": "Lightly Polluted",
-        "cot_type": "a-h-G-E-S",
-        "description": "Lightly polluted; sensitive groups should limit prolonged outdoor exposure"
-    },
-    "red": {
-        "range": (151, 600),
-        "label": "Heavily Polluted",
-        "cot_type": "a-h-G-E-S",
-        "description": "Heavily polluted; public should limit outdoor exposure; masks with PM2.5 filter recommended"
-    },
-}
+# ---------------------------------------------------------------------------
+# AQI (China HJ 633-2012) collapsed to the four ATAK affiliation colours.
+# The colour in ATAK comes from the affiliation part of the CoT type:
+#   a-f = blue, a-n = green, a-u = yellow, a-h = red
+# ---------------------------------------------------------------------------
+# (max AQI, colour, CoT type, label, advice)
+LEVELS = [
+    (50, "blue", "a-f-G-E-S", "Excellent", "No restrictions"),
+    (100, "green", "a-n-G-E-S", "Good", "Acceptable; unusually sensitive people take care"),
+    (150, "yellow", "a-u-G-E-S", "Lightly polluted", "Sensitive groups limit prolonged outdoor exposure"),
+    (float("inf"), "red", "a-h-G-E-S", "Moderately polluted or worse", "Everyone limit outdoor exposure"),
+]
 
-# Pollutant AQI conversion formulas (China standard)
-# Maps pollutant name to (breakpoints, AQI_breakpoints, units_expected)
-POLLUTANT_AQI_PARAMS = {
-    "pm25": {  # PM2.5 (µg/m³)
-        "breakpoints": [35, 75, 115, 150, 250, 500],
-        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
-        "units": ["µg/m³", "ug/m³", "μg/m³"],
-    },
-    "pm10": {  # PM10 (µg/m³)
-        "breakpoints": [50, 150, 250, 350, 420, 600],
-        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
-        "units": ["µg/m³", "ug/m³", "μg/m³"],
-    },
-    "o3": {  # Ozone (µg/m³)
-        "breakpoints": [120, 160, 200, 1200],
-        "aqi_breakpoints": [50, 100, 150, 500],
-        "units": ["µg/m³", "ug/m³", "μg/m³"],
-    },
-    "no2": {  # Nitrogen dioxide (µg/m³)
-        "breakpoints": [40, 80, 120, 180, 280, 565],
-        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
-        "units": ["µg/m³", "ug/m³", "μg/m³"],
-    },
-    "so2": {  # Sulfur dioxide (µg/m³)
-        "breakpoints": [50, 150, 475, 800, 1600, 2620],
-        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
-        "units": ["µg/m³", "ug/m³", "μg/m³"],
-    },
-    "co": {  # Carbon monoxide (mg/m³)
-        "breakpoints": [2, 4, 14, 24, 36, 60],
-        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
-        "units": ["mg/m³"],
-    },
+# Concentration breakpoints and the AQI value at each one.
+# PM and gases in ug/m3, CO in mg/m3. PM/SO2/NO2/CO use 24h tables, O3 the 8h table.
+IAQI = [0, 50, 100, 150, 200, 300, 400, 500]
+AQI_TABLES = {
+    "pm25": ([0, 35, 75, 115, 150, 250, 350, 500], IAQI),
+    "pm10": ([0, 50, 150, 250, 350, 420, 500, 600], IAQI),
+    "so2": ([0, 50, 150, 475, 800, 1600, 2100, 2620], IAQI),
+    "no2": ([0, 40, 80, 180, 280, 565, 750, 940], IAQI),
+    "co": ([0, 2, 4, 14, 24, 36, 48, 60], IAQI),
+    "o3": ([0, 100, 160, 215, 265, 800], [0, 50, 100, 150, 200, 300]),
 }
+MOLAR_MASS = {"so2": 64.07, "no2": 46.01, "o3": 48.0, "co": 28.01}
+PARTICULATES = {"pm25", "pm10"}
 
 
 class Config:
@@ -92,12 +54,12 @@ class Config:
 
     def default_values(self):
         return {
-            "locations": "3400936",
+            "locations": "",
             "poll_interval": "10",
             "stale_minutes": "10",
-            "cot_type": "a-f-G-E-S-E",
-            "cot_host": "0.0.0.0",
-            "cot_port": "9000",
+            "cot_type": "a-f-G-E-S",
+            "cot_host": "127.0.0.1",
+            "cot_port": "8087",
             "callsign_prefix": "AQ",
             "config_reload": "5",
             "database": "/data/aqtak-{last_edit}.db",
@@ -115,19 +77,14 @@ class Config:
 
         try:
             self.last_mtime = CONFIG_PATH.stat().st_mtime
+            parsed = self.default_values()
             with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-                raw = fh.read().splitlines()
-
-            parsed = {}
-            for line in raw:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                parsed[key.strip()] = value.strip()
-
+                for line in fh.read().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    parsed[key.strip()] = value.strip()
             self.data = parsed
         except Exception as exc:
             print(f"ERROR reading config: {exc}")
@@ -144,13 +101,11 @@ class Config:
             return default
 
     def get_bool(self, key, default=True):
-        val = self.get(key, str(default)).lower()
-        return val in ["true", "1", "yes", "on"]
+        val = str(self.get(key, default)).lower()
+        return val in ("true", "1", "yes", "on")
 
     def get_locations(self):
         raw = self.get("locations", "")
-        if not raw:
-            return []
         ids = []
         for part in raw.split(","):
             part = part.strip()
@@ -174,8 +129,7 @@ class Config:
         if not CONFIG_PATH.exists():
             return False
         try:
-            current = CONFIG_PATH.stat().st_mtime
-            return current != self.last_mtime
+            return CONFIG_PATH.stat().st_mtime != self.last_mtime
         except Exception:
             return False
 
@@ -202,7 +156,6 @@ class StationDB:
             )
             """
         )
-
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS measurements (
@@ -242,13 +195,7 @@ class StationDB:
             INSERT INTO measurements (location_id, observed_at, parameter, value, units)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (
-                location_id,
-                datetime.now(timezone.utc).isoformat(),
-                parameter,
-                value,
-                units,
-            ),
+            (location_id, datetime.now(timezone.utc).isoformat(), parameter, value, units),
         )
         self.conn.commit()
 
@@ -259,22 +206,16 @@ class StationDB:
 
 def api_get(api_base, path):
     headers = {"X-API-Key": OPENAQ_API_KEY}
-    url = f"{api_base}{path}"
-    response = requests.get(url, headers=headers, timeout=15)
+    response = requests.get(f"{api_base}{path}", headers=headers, timeout=15)
     response.raise_for_status()
     return response.json()
 
 
-def get_location(api_base, location_id):
-    data = api_get(api_base, f"/locations/{location_id}")
-    results = data.get("results", [])
+def build_station(api_base, location_id):
+    results = api_get(api_base, f"/locations/{location_id}").get("results", [])
     if not results:
         raise RuntimeError(f"OpenAQ location {location_id} returned no data")
-    return results[0]
-
-
-def build_station(api_base, location_id):
-    location = get_location(api_base, location_id)
+    location = results[0]
 
     coords = location.get("coordinates", {})
     lat = coords.get("latitude")
@@ -283,23 +224,21 @@ def build_station(api_base, location_id):
         raise RuntimeError(f"Location {location_id} has no coordinates")
 
     name = location.get("name") or f"OpenAQ {location_id}"
-    provider_obj = location.get("provider", {})
-    provider_name = provider_obj.get("name", "OpenAQ")
+    provider_name = (location.get("provider") or {}).get("name", "OpenAQ")
 
     sensors = {}
     for sensor in location.get("sensors", []):
         sensor_id = sensor.get("id")
         parameter = sensor.get("parameter", {})
         parameter_name = parameter.get("name")
-        units = parameter.get("units")
         if sensor_id is None or parameter_name is None:
             continue
-        sensors[sensor_id] = {
-            "name": parameter_name,
-            "units": units,
-        }
+        sensors[sensor_id] = {"name": parameter_name, "units": parameter.get("units")}
 
-    station = {
+    print(f"Loaded location {location_id}: {name} ({lat}, {lon})")
+    print(f"  Provider: {provider_name}")
+    print(f"  Sensors: {', '.join(s['name'] for s in sensors.values())}")
+    return {
         "location_id": location_id,
         "name": name,
         "lat": lat,
@@ -307,12 +246,6 @@ def build_station(api_base, location_id):
         "provider": provider_name,
         "sensors": sensors,
     }
-
-    print(f"Loaded location {location_id}: {name} ({lat}, {lon})")
-    print(f"  Provider: {provider_name}")
-    sensor_names = ", ".join(sensor["name"] for sensor in sensors.values())
-    print(f"  Sensors: {sensor_names}")
-    return station
 
 
 def load_stations(api_base, location_ids):
@@ -326,186 +259,122 @@ def load_stations(api_base, location_ids):
 
 
 def get_latest_measurements(api_base, station):
-    location_id = station["location_id"]
-    data = api_get(api_base, f"/locations/{location_id}/latest")
-    results = data.get("results", [])
-
+    results = api_get(api_base, f"/locations/{station['location_id']}/latest").get("results", [])
     values = {}
     for item in results:
-        sensor_id = item.get("sensorsId")
-        value = item.get("value")
-        sensor = station["sensors"].get(sensor_id)
+        sensor = station["sensors"].get(item.get("sensorsId"))
         if not sensor:
             continue
-        parameter = sensor["name"]
-        values[parameter] = {
-            "value": value,
-            "units": sensor.get("units"),
-        }
-
+        values[sensor["name"]] = {"value": item.get("value"), "units": sensor.get("units")}
     print(f"{station['name']} measurements: {values}")
     return values
 
 
 def sanitize_for_xml(text):
-    """Remove/replace Unicode characters that break XML parsing"""
     if not text:
         return text
-    replacements = {
-        'µ': 'u',
-        '³': '3',
-        '²': '2',
-        '°': 'deg',
-        '→': '->',
-        '←': '<-',
-    }
-    result = text
-    for char, replacement in replacements.items():
-        result = result.replace(char, replacement)
-    return result
+    for char, repl in {"\u00b5": "u", "\u03bc": "u", "\u00b3": "3", "\u00b2": "2", "\u00b0": "deg"}.items():
+        text = text.replace(char, repl)
+    return text
 
 
-def calculate_aqi(pollutant_name, value, units):
-    """
-    Calculate AQI based on China's standard for a given pollutant.
-    Returns AQI value (0-600+) or None if calculation fails.
-    """
-    pollutant_name = pollutant_name.lower().replace(" ", "")
-    
-    if pollutant_name not in POLLUTANT_AQI_PARAMS:
+def to_standard_units(param, value, units):
+    """Convert to ug/m3 (mg/m3 for CO). Returns None if the units are unknown."""
+    u = (units or "").lower().replace("\u00b5", "u").replace("\u03bc", "u").replace(" ", "")
+    if u == "ug/m3":
+        ug = value
+    elif u == "mg/m3":
+        ug = value * 1000
+    elif u == "ppm" and param in MOLAR_MASS:
+        ug = value * MOLAR_MASS[param] / 24.45 * 1000
+    elif u == "ppb" and param in MOLAR_MASS:
+        ug = value * MOLAR_MASS[param] / 24.45
+    else:
         return None
-    
-    params = POLLUTANT_AQI_PARAMS[pollutant_name]
-    
-    # Check if units match expected
-    if units and not any(expected in units for expected in params["units"]):
-        print(f"  Warning: {pollutant_name} units {units} don't match expected {params['units']}")
-    
-    breakpoints = params["breakpoints"]
-    aqi_breakpoints = params["aqi_breakpoints"]
-    
-    # Find which bracket the value falls into
-    for i, bp in enumerate(breakpoints):
-        if value <= bp:
-            # Calculate AQI using linear interpolation
-            if i == 0:
-                # Below first breakpoint
-                aqi = (aqi_breakpoints[i] / breakpoints[i]) * value
-            else:
-                # Between breakpoints
-                x1, x2 = breakpoints[i - 1], breakpoints[i]
-                y1, y2 = aqi_breakpoints[i - 1], aqi_breakpoints[i]
-                aqi = y1 + (value - x1) * (y2 - y1) / (x2 - x1)
-            return int(round(aqi))
-    
-    # Above highest breakpoint
-    return aqi_breakpoints[-1]
+    return ug / 1000 if param == "co" else ug
+
+
+def calculate_iaqi(param, value, units):
+    """Individual AQI for one pollutant, or None if not an AQI pollutant."""
+    table = AQI_TABLES.get(param.lower())
+    if table is None or value is None:
+        return None
+    conc = to_standard_units(param.lower(), max(float(value), 0.0), units)
+    if conc is None:
+        print(f"  Skipping {param}: unsupported units '{units}'")
+        return None
+    bps, aqis = table
+    if conc >= bps[-1]:
+        return aqis[-1]
+    for i in range(1, len(bps)):
+        if conc <= bps[i]:
+            lo_c, hi_c = bps[i - 1], bps[i]
+            lo_a, hi_a = aqis[i - 1], aqis[i]
+            return int(round(lo_a + (conc - lo_c) * (hi_a - lo_a) / (hi_c - lo_c)))
+    return aqis[-1]
 
 
 def get_highest_aqi(data):
-    """
-    Calculate AQI for all pollutants and return the highest AQI value.
-    Also returns the pollutant that caused it.
-    """
-    max_aqi = 0
-    max_pollutant = None
-    
-    for parameter, measurement in data.items():
-        value = measurement.get("value")
-        units = measurement.get("units")
-        
-        if value is None:
-            continue
-        
-        aqi = calculate_aqi(parameter, value, units)
-        if aqi is not None and aqi > max_aqi:
-            max_aqi = aqi
-            max_pollutant = parameter
-    
-    return max_aqi, max_pollutant
+    """Highest individual AQI across all pollutants: (aqi, parameter) or (None, None)."""
+    best, best_param = None, None
+    for param, m in data.items():
+        aqi = calculate_iaqi(param, m.get("value"), m.get("units"))
+        if aqi is not None and (best is None or aqi > best):
+            best, best_param = aqi, param
+    return best, best_param
 
 
-def get_aqi_color(aqi_value):
-    """
-    Map AQI value to color name using China's 4-color simplified standard.
-    Returns color name and color info dict.
-    """
-    for color_name, color_info in AQI_COLORS.items():
-        min_val, max_val = color_info["range"]
-        if min_val <= aqi_value <= max_val:
-            return color_name, color_info
-    
-    # If somehow higher than highest, return red
-    return "red", AQI_COLORS["red"]
+def get_level(aqi):
+    for level in LEVELS:
+        if aqi <= level[0]:
+            return level
+    return LEVELS[-1]
+
+
+PARAMETER_NAMES = {
+    "pm1": "PM1", "pm25": "PM2.5", "pm10": "PM10",
+    "relativehumidity": "Humidity", "temperature": "Temperature",
+    "um003": "UM003", "um005": "UM005", "um010": "UM010", "pm03_count": "PM0.3 Count",
+    "o3": "O3", "no2": "NO2", "so2": "SO2", "co": "CO",
+}
 
 
 def make_cot(config, station, data):
     now = datetime.now(timezone.utc)
-    stale_minutes = config.get_int("stale_minutes", 10)
-    stale_time = now + timedelta(minutes=stale_minutes)
-
+    stale_time = now + timedelta(minutes=config.get_int("stale_minutes", 10))
     time_string = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     stale_string = stale_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    parameter_names = {
-        "pm1": "PM1",
-        "pm25": "PM2.5",
-        "pm10": "PM10",
-        "relativehumidity": "Humidity",
-        "temperature": "Temperature",
-        "um003": "UM003",
-        "um005": "UM005",
-        "um010": "UM010",
-        "pm03_count": "PM0.3 Count",
-        "o3": "O3",
-        "no2": "NO2",
-        "so2": "SO2",
-        "co": "CO",
-    }
-
+    cot_type = config.get("cot_type", "a-f-G-E-S")
     remarks_lines = []
-    
-    # Calculate AQI if enabled
-    enable_aqi_colors = config.get_bool("enable_aqi_colors", True)
-    aqi_value = 0
-    highest_pollutant = None
-    cot_type = config.get("cot_type", "a-h-G-E-S")
-    
-    if enable_aqi_colors:
-        aqi_value, highest_pollutant = get_highest_aqi(data)
-        color_name, color_info = get_aqi_color(aqi_value)
-        
-        remarks_lines.append(f"AQI: {aqi_value} ({color_info['label']})")
-        remarks_lines.append(f"Health: {color_info['description']}")
-        if highest_pollutant:
-            remarks_lines.append(f"Highest: {highest_pollutant.upper()}")
-        remarks_lines.append("")
-        
-        # Use hostile type for all to ensure consistent color handling
-        cot_type = "a-h-G-E-S"
-    
-    # Add measurement details
-    for parameter, measurement in data.items():
-        value = measurement.get("value")
-        units = measurement.get("units")
-        display_name = parameter_names.get(parameter, parameter.replace("_", " ").upper())
-        
-        if units:
-            units = sanitize_for_xml(units)
-            remarks_lines.append(f"{display_name}: {value} {units}")
-        else:
-            remarks_lines.append(f"{display_name}: {value}")
 
-    remarks = (
-        "\n".join(remarks_lines)
-        + "\n"
-        + f"Source: {station['provider']}\n"
-        + f"Location: {station['name']}"
-    )
+    if config.get_bool("enable_aqi_colors", True):
+        aqi, param = get_highest_aqi(data)
+        if aqi is None:
+            remarks_lines.append("AQI: n/a (no AQI pollutants reported)")
+        else:
+            _, color, level_type, label, advice = get_level(aqi)
+            cot_type = level_type
+            shown = PARAMETER_NAMES.get(param, param.upper())
+            remarks_lines.append(f"AQI: {aqi} {label} ({color.upper()})")
+            remarks_lines.append(f"Driver: {shown}")
+            remarks_lines.append(f"Advice: {advice}")
+            if aqi > 50:
+                if param in PARTICULATES:
+                    remarks_lines.append("Mask: N95/FFP2 reduces particulate exposure")
+                else:
+                    remarks_lines.append("Mask: ordinary masks do NOT stop this gas")
+        remarks_lines.append("")
+
+    for parameter, m in data.items():
+        display = PARAMETER_NAMES.get(parameter, parameter.replace("_", " ").upper())
+        units = sanitize_for_xml(m.get("units"))
+        remarks_lines.append(f"{display}: {m.get('value')} {units}" if units else f"{display}: {m.get('value')}")
+
+    remarks = "\n".join(remarks_lines) + f"\nSource: {station['provider']}\nLocation: {station['name']}"
 
     uid = f"openaq.{station['location_id']}"
-    callsign_prefix = config.get("callsign_prefix", "AQ")
-    callsign = f"{callsign_prefix} {station['name']}"
+    callsign = f"{config.get('callsign_prefix', 'AQ')} {station['name']}"
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <event version="2.0"
@@ -529,109 +398,82 @@ class StationManager:
         self.config = Config()
         self.stations = []
         self.db = None
-        self.api_base = self.config.get("openaq_api", "https://api.openaq.org/v3")
+        self.api_base = self.config.get("openaq_api")
         self.lock = threading.Lock()
         self.ready = False
-        self.last_aqi = {}  # Track last AQI for each station to detect threshold crossings
 
     def reload(self):
         try:
-            with self.lock:
-                config = Config()
-                api_base = config.get("openaq_api", "https://api.openaq.org/v3")
+            config = Config()
+            api_base = config.get("openaq_api")
+            location_ids = config.get_locations()
+            stations = load_stations(api_base, location_ids)
+            if location_ids and not stations:
+                raise RuntimeError("no configured locations could be loaded")
 
+            db = StationDB(config.get_database_path())
+            for station in stations:
+                db.save_station(station)
+
+            with self.lock:
                 if self.db is not None:
                     self.db.close()
-
-                db_path = config.get_database_path()
-                self.db = StationDB(db_path)
-                print(f"Using database: {db_path}")
-
-                location_ids = config.get_locations()
-                stations = load_stations(api_base, location_ids)
-
-                for station in stations:
-                    self.db.save_station(station)
-
+                self.db = db
                 self.config = config
                 self.stations = stations
                 self.api_base = api_base
                 self.ready = True
-                print(f"Loaded {len(stations)} of {len(location_ids)} configured locations")
-                print(f"Configuration reload complete")
-                print(f"AQI colors: {'enabled' if config.get_bool('enable_aqi_colors', True) else 'disabled'}")
-                print(f"CoT type: {config.get('cot_type', 'a-h-G-E-S')}")
+            print(f"Loaded {len(stations)} of {len(location_ids)} configured locations")
+            print(f"AQI colours: {'enabled' if config.get_bool('enable_aqi_colors') else 'disabled'}")
         except Exception as exc:
-            print(f"FATAL: reload() failed: {exc}")
-            self.ready = False
+            print(f"ERROR: reload() failed: {exc}")
 
     def get_config(self):
         with self.lock:
             return self.config
 
-    def get_stations(self):
+    def snapshot(self):
         with self.lock:
-            return list(self.stations) if self.ready else []
-
-    def get_db(self):
-        with self.lock:
-            return self.db
-
-    def is_ready(self):
-        with self.lock:
-            return self.ready
+            return self.config, list(self.stations), self.db, self.api_base, self.ready
 
     def check_reload(self):
-        if self.config.has_changed():
+        if self.get_config().has_changed():
             print("Configuration changed; reloading...")
             self.reload()
 
     def send_all(self, conn):
-        config = self.get_config()
-        stations = self.get_stations()
-        db = self.get_db()
-
+        config, stations, db, api_base, _ = self.snapshot()
         if not stations:
             print("WARNING: no stations to send")
             return
-
         for station in stations:
             try:
-                data = get_latest_measurements(self.api_base, station)
-                for parameter, measurement in data.items():
-                    db.save_measurement(
-                        station["location_id"],
-                        parameter,
-                        measurement.get("value"),
-                        measurement.get("units"),
-                    )
-
+                data = get_latest_measurements(api_base, station)
+                for parameter, m in data.items():
+                    db.save_measurement(station["location_id"], parameter, m.get("value"), m.get("units"))
                 cot = make_cot(config, station, data)
-                conn.sendall(cot.encode("utf-8"))
-                print(f"CoT sent: openaq.{station['location_id']}")
-
             except Exception as exc:
                 print(f"ERROR updating station {station['location_id']}: {exc}")
-                raise
+                continue
+            conn.sendall(cot.encode("utf-8"))  # socket errors propagate -> reconnect
+            print(f"CoT sent: openaq.{station['location_id']}")
 
 
 def main():
     manager = StationManager()
 
-    # Load config in background thread
-    print("[DEBUG] Starting background reload thread...")
     def initial_load():
-        print("[DEBUG] Initial reload starting...")
-        manager.reload()
-    
-    load_thread = threading.Thread(target=initial_load, daemon=False)
-    load_thread.start()
-
-    # Start config watchdog
-    def config_watchdog():
-        reload_interval = manager.get_config().get_int("config_reload", DEFAULT_CONFIG_RELOAD_SECONDS)
         while True:
-            time.sleep(reload_interval)
+            manager.reload()
+            if manager.snapshot()[4]:
+                return
+            time.sleep(30)
+
+    threading.Thread(target=initial_load, daemon=True).start()
+
+    def config_watchdog():
+        while True:
+            time.sleep(manager.get_config().get_int("config_reload", DEFAULT_CONFIG_RELOAD_SECONDS))
             try:
                 manager.check_reload()
             except Exception as exc:
@@ -639,57 +481,34 @@ def main():
 
     threading.Thread(target=config_watchdog, daemon=True).start()
 
-    host = manager.get_config().get("cot_host", "0.0.0.0")
-    port = manager.get_config().get_int("cot_port", 9000)
-
-    print(f"Listening on {host}:{port}")
     print("AQTAK v2 ready (loading stations in background)")
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((host, port))
-        server.listen(5)
+    while True:
+        config, _, _, _, ready = manager.snapshot()
+        if not ready:
+            time.sleep(1)
+            continue
 
-        while True:
-            try:
-                conn, addr = server.accept()
-                print(f"ATAK connection from {addr}")
-                with conn:
-                    if not manager.is_ready():
-                        print("Waiting for manager to load...")
-                        for _ in range(30):
-                            if manager.is_ready():
-                                break
-                            time.sleep(1)
-                        if not manager.is_ready():
-                            print("ERROR: Manager failed to load within 30 seconds")
-                            continue
-
-                    # Send immediately on connection
-                    try:
-                        manager.send_all(conn)
-                    except (BrokenPipeError, ConnectionResetError):
-                        print("ATAK disconnected after initial send")
-                        continue
-                    except Exception as exc:
-                        print(f"Error on initial send: {exc}")
-                        continue
-
-                    # Then continue polling
-                    while True:
-                        try:
-                            poll_interval = manager.get_config().get_int("poll_interval", 10)
-                            time.sleep(poll_interval)
-                            manager.send_all(conn)
-                        except (BrokenPipeError, ConnectionResetError):
-                            print("ATAK disconnected")
-                            break
-                        except Exception as exc:
-                            print(f"Error: {exc}")
-                            break
-            except KeyboardInterrupt:
-                print("Shutting down")
-                break
+        host = config.get("cot_host", "127.0.0.1")
+        port = config.get_int("cot_port", 8087)
+        print(f"Connecting to Taky at {host}:{port}")
+        try:
+            with socket.create_connection((host, port), timeout=10) as conn:
+                conn.settimeout(None)
+                print(f"Connected to Taky at {host}:{port}")
+                while True:
+                    manager.send_all(conn)
+                    time.sleep(manager.get_config().get_int("poll_interval", 10))
+                    new = manager.get_config()
+                    if (new.get("cot_host"), new.get_int("cot_port", 8087)) != (host, port):
+                        print("Taky address changed; reconnecting")
+                        break
+        except KeyboardInterrupt:
+            print("Shutting down")
+            break
+        except OSError as exc:
+            print(f"Connection failed: {exc}")
+            time.sleep(5)
 
 
 if __name__ == "__main__":

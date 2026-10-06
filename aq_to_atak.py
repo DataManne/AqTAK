@@ -447,11 +447,22 @@ def main():
                 conn, addr = server.accept()
                 print(f"ATAK connection from {addr}")
                 with conn:
+                    # Send immediately on connection
+                    try:
+                        manager.send_all(conn)
+                    except (BrokenPipeError, ConnectionResetError):
+                        print("ATAK disconnected after first send")
+                        continue
+                    except Exception as exc:
+                        print(f"Error on first send: {exc}")
+                        continue
+
+                    # Then continue polling
                     while True:
                         try:
-                            manager.send_all(conn)
                             poll_interval = manager.get_config().get_int("poll_interval", 60)
                             time.sleep(poll_interval)
+                            manager.send_all(conn)
                         except (BrokenPipeError, ConnectionResetError):
                             print("ATAK disconnected")
                             break

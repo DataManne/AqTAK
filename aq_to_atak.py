@@ -19,6 +19,71 @@ if not OPENAQ_API_KEY:
     raise RuntimeError("OPENAQ_API_KEY is not set in the environment")
 
 
+# AQI color mapping (China standard, 4-color simplified)
+# Maps AQI ranges to CoT type and visual description
+AQI_COLORS = {
+    "blue": {
+        "range": (0, 35),
+        "label": "Excellent",
+        "cot_type": "a-h-G-E-S",
+        "description": "Air quality is good; suitable for all outdoor activities"
+    },
+    "green": {
+        "range": (36, 75),
+        "label": "Good",
+        "cot_type": "a-h-G-E-S",
+        "description": "Air quality is acceptable; most people can engage in outdoor activities"
+    },
+    "yellow": {
+        "range": (76, 150),
+        "label": "Lightly Polluted",
+        "cot_type": "a-h-G-E-S",
+        "description": "Lightly polluted; sensitive groups should limit prolonged outdoor exposure"
+    },
+    "red": {
+        "range": (151, 600),
+        "label": "Heavily Polluted",
+        "cot_type": "a-h-G-E-S",
+        "description": "Heavily polluted; public should limit outdoor exposure; masks with PM2.5 filter recommended"
+    },
+}
+
+# Pollutant AQI conversion formulas (China standard)
+# Maps pollutant name to (breakpoints, AQI_breakpoints, units_expected)
+POLLUTANT_AQI_PARAMS = {
+    "pm25": {  # PM2.5 (µg/m³)
+        "breakpoints": [35, 75, 115, 150, 250, 500],
+        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
+        "units": ["µg/m³", "ug/m³", "μg/m³"],
+    },
+    "pm10": {  # PM10 (µg/m³)
+        "breakpoints": [50, 150, 250, 350, 420, 600],
+        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
+        "units": ["µg/m³", "ug/m³", "μg/m³"],
+    },
+    "o3": {  # Ozone (µg/m³)
+        "breakpoints": [120, 160, 200, 1200],
+        "aqi_breakpoints": [50, 100, 150, 500],
+        "units": ["µg/m³", "ug/m³", "μg/m³"],
+    },
+    "no2": {  # Nitrogen dioxide (µg/m³)
+        "breakpoints": [40, 80, 120, 180, 280, 565],
+        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
+        "units": ["µg/m³", "ug/m³", "μg/m³"],
+    },
+    "so2": {  # Sulfur dioxide (µg/m³)
+        "breakpoints": [50, 150, 475, 800, 1600, 2620],
+        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
+        "units": ["µg/m³", "ug/m³", "μg/m³"],
+    },
+    "co": {  # Carbon monoxide (mg/m³)
+        "breakpoints": [2, 4, 14, 24, 36, 60],
+        "aqi_breakpoints": [50, 100, 150, 200, 300, 500],
+        "units": ["mg/m³"],
+    },
+}
+
+
 class Config:
     def __init__(self):
         self.data = {}
@@ -38,6 +103,7 @@ class Config:
             "database": "/data/aqtak-{last_edit}.db",
             "log_level": "INFO",
             "openaq_api": "https://api.openaq.org/v3",
+            "enable_aqi_colors": "true",
         }
 
     def load(self):
@@ -76,6 +142,10 @@ class Config:
             return int(self.get(key, default))
         except (TypeError, ValueError):
             return default
+
+    def get_bool(self, key, default=True):
+        val = self.get(key, str(default)).lower()
+        return val in ["true", "1", "yes", "on"]
 
     def get_locations(self):
         raw = self.get("locations", "")
@@ -281,19 +351,92 @@ def sanitize_for_xml(text):
     """Remove/replace Unicode characters that break XML parsing"""
     if not text:
         return text
-    # Replace problematic Unicode characters with ASCII equivalents
     replacements = {
-        'µ': 'u',      # micro symbol
-        '³': '3',      # superscript 3
-        '²': '2',      # superscript 2
-        '°': 'deg',    # degree symbol
-        '→': '->',     # arrow
-        '←': '<-',     # arrow
+        'µ': 'u',
+        '³': '3',
+        '²': '2',
+        '°': 'deg',
+        '→': '->',
+        '←': '<-',
     }
     result = text
     for char, replacement in replacements.items():
         result = result.replace(char, replacement)
     return result
+
+
+def calculate_aqi(pollutant_name, value, units):
+    """
+    Calculate AQI based on China's standard for a given pollutant.
+    Returns AQI value (0-600+) or None if calculation fails.
+    """
+    pollutant_name = pollutant_name.lower().replace(" ", "")
+    
+    if pollutant_name not in POLLUTANT_AQI_PARAMS:
+        return None
+    
+    params = POLLUTANT_AQI_PARAMS[pollutant_name]
+    
+    # Check if units match expected
+    if units and not any(expected in units for expected in params["units"]):
+        print(f"  Warning: {pollutant_name} units {units} don't match expected {params['units']}")
+    
+    breakpoints = params["breakpoints"]
+    aqi_breakpoints = params["aqi_breakpoints"]
+    
+    # Find which bracket the value falls into
+    for i, bp in enumerate(breakpoints):
+        if value <= bp:
+            # Calculate AQI using linear interpolation
+            if i == 0:
+                # Below first breakpoint
+                aqi = (aqi_breakpoints[i] / breakpoints[i]) * value
+            else:
+                # Between breakpoints
+                x1, x2 = breakpoints[i - 1], breakpoints[i]
+                y1, y2 = aqi_breakpoints[i - 1], aqi_breakpoints[i]
+                aqi = y1 + (value - x1) * (y2 - y1) / (x2 - x1)
+            return int(round(aqi))
+    
+    # Above highest breakpoint
+    return aqi_breakpoints[-1]
+
+
+def get_highest_aqi(data):
+    """
+    Calculate AQI for all pollutants and return the highest AQI value.
+    Also returns the pollutant that caused it.
+    """
+    max_aqi = 0
+    max_pollutant = None
+    
+    for parameter, measurement in data.items():
+        value = measurement.get("value")
+        units = measurement.get("units")
+        
+        if value is None:
+            continue
+        
+        aqi = calculate_aqi(parameter, value, units)
+        if aqi is not None and aqi > max_aqi:
+            max_aqi = aqi
+            max_pollutant = parameter
+    
+    return max_aqi, max_pollutant
+
+
+def get_aqi_color(aqi_value):
+    """
+    Map AQI value to color name using China's 4-color simplified standard.
+    Returns color name and color info dict.
+    """
+    for color_name, color_info in AQI_COLORS.items():
+        min_val, max_val = color_info["range"]
+        if min_val <= aqi_value <= max_val:
+            return color_name, color_info
+    
+    # If somehow higher than highest, return red
+    return "red", AQI_COLORS["red"]
 
 
 def make_cot(config, station, data):
@@ -314,15 +457,39 @@ def make_cot(config, station, data):
         "um005": "UM005",
         "um010": "UM010",
         "pm03_count": "PM0.3 Count",
+        "o3": "O3",
+        "no2": "NO2",
+        "so2": "SO2",
+        "co": "CO",
     }
 
     remarks_lines = []
+    
+    # Calculate AQI if enabled
+    enable_aqi_colors = config.get_bool("enable_aqi_colors", True)
+    aqi_value = 0
+    highest_pollutant = None
+    cot_type = config.get("cot_type", "a-h-G-E-S")
+    
+    if enable_aqi_colors:
+        aqi_value, highest_pollutant = get_highest_aqi(data)
+        color_name, color_info = get_aqi_color(aqi_value)
+        
+        remarks_lines.append(f"AQI: {aqi_value} ({color_info['label']})")
+        remarks_lines.append(f"Health: {color_info['description']}")
+        if highest_pollutant:
+            remarks_lines.append(f"Highest: {highest_pollutant.upper()}")
+        remarks_lines.append("")
+        
+        # Use hostile type for all to ensure consistent color handling
+        cot_type = "a-h-G-E-S"
+    
+    # Add measurement details
     for parameter, measurement in data.items():
         value = measurement.get("value")
         units = measurement.get("units")
         display_name = parameter_names.get(parameter, parameter.replace("_", " ").upper())
         
-        # Sanitize units for XML
         if units:
             units = sanitize_for_xml(units)
             remarks_lines.append(f"{display_name}: {value} {units}")
@@ -337,7 +504,6 @@ def make_cot(config, station, data):
     )
 
     uid = f"openaq.{station['location_id']}"
-    cot_type = config.get("cot_type", "a-f-G-E-S-E")
     callsign_prefix = config.get("callsign_prefix", "AQ")
     callsign = f"{callsign_prefix} {station['name']}"
 
@@ -366,6 +532,7 @@ class StationManager:
         self.api_base = self.config.get("openaq_api", "https://api.openaq.org/v3")
         self.lock = threading.Lock()
         self.ready = False
+        self.last_aqi = {}  # Track last AQI for each station to detect threshold crossings
 
     def reload(self):
         try:
@@ -392,7 +559,8 @@ class StationManager:
                 self.ready = True
                 print(f"Loaded {len(stations)} of {len(location_ids)} configured locations")
                 print(f"Configuration reload complete")
-                print(f"CoT type: {self.config.get('cot_type', 'a-f-G-E-S-E')}")
+                print(f"AQI colors: {'enabled' if config.get_bool('enable_aqi_colors', True) else 'disabled'}")
+                print(f"CoT type: {config.get('cot_type', 'a-h-G-E-S')}")
         except Exception as exc:
             print(f"FATAL: reload() failed: {exc}")
             self.ready = False

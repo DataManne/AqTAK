@@ -343,32 +343,37 @@ class StationManager:
         self.db = None
         self.api_base = self.config.get("openaq_api", "https://api.openaq.org/v3")
         self.lock = threading.Lock()
-        self.reload()
+        self.ready = False
 
     def reload(self):
-        with self.lock:
-            config = Config()
-            api_base = config.get("openaq_api", "https://api.openaq.org/v3")
+        try:
+            with self.lock:
+                config = Config()
+                api_base = config.get("openaq_api", "https://api.openaq.org/v3")
 
-            if self.db is not None:
-                self.db.close()
+                if self.db is not None:
+                    self.db.close()
 
-            db_path = config.get_database_path()
-            self.db = StationDB(db_path)
-            print(f"Using database: {db_path}")
+                db_path = config.get_database_path()
+                self.db = StationDB(db_path)
+                print(f"Using database: {db_path}")
 
-            location_ids = config.get_locations()
-            stations = load_stations(api_base, location_ids)
+                location_ids = config.get_locations()
+                stations = load_stations(api_base, location_ids)
 
-            for station in stations:
-                self.db.save_station(station)
+                for station in stations:
+                    self.db.save_station(station)
 
-            self.config = config
-            self.stations = stations
-            self.api_base = api_base
-            print(f"Loaded {len(stations)} of {len(location_ids)} configured locations")
-            print(f"Configuration reload complete")
-            print(f"CoT type: {self.config.get('cot_type', 'a-f-G-E-S-E')}")
+                self.config = config
+                self.stations = stations
+                self.api_base = api_base
+                self.ready = True
+                print(f"Loaded {len(stations)} of {len(location_ids)} configured locations")
+                print(f"Configuration reload complete")
+                print(f"CoT type: {self.config.get('cot_type', 'a-f-G-E-S-E')}")
+        except Exception as exc:
+            print(f"FATAL: reload() failed: {exc}")
+            self.ready = False
 
     def get_config(self):
         with self.lock:
@@ -376,11 +381,15 @@ class StationManager:
 
     def get_stations(self):
         with self.lock:
-            return list(self.stations)
+            return list(self.stations) if self.ready else []
 
     def get_db(self):
         with self.lock:
             return self.db
+
+    def is_ready(self):
+        with self.lock:
+            return self.ready
 
     def check_reload(self):
         if self.config.has_changed():
@@ -420,9 +429,16 @@ class StationManager:
 def main():
     manager = StationManager()
 
-    if not manager.get_stations():
-        raise RuntimeError("No OpenAQ locations could be loaded")
+    # Load config in background thread
+    print("[DEBUG] Starting background reload thread...")
+    def initial_load():
+        print("[DEBUG] Initial reload starting...")
+        manager.reload()
+    
+    load_thread = threading.Thread(target=initial_load, daemon=False)
+    load_thread.start()
 
+    # Start config watchdog
     def config_watchdog():
         reload_interval = manager.get_config().get_int("config_reload", DEFAULT_CONFIG_RELOAD_SECONDS)
         while True:
@@ -437,19 +453,31 @@ def main():
     host = manager.get_config().get("cot_host", "0.0.0.0")
     port = manager.get_config().get_int("cot_port", 9000)
 
+    print(f"[DEBUG] Binding to {host}:{port}")
     print(f"Listening on {host}:{port}")
-    print("AQTAK v2 ready")
+    print("AQTAK v2 ready (loading stations in background)")
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((host, port))
         server.listen(5)
+        print("[DEBUG] Server listening")
 
         while True:
             try:
                 conn, addr = server.accept()
                 print(f"[DEBUG] ATAK connection from {addr}")
                 with conn:
+                    if not manager.is_ready():
+                        print("[DEBUG] Manager not ready, waiting...")
+                        for _ in range(30):  # Wait up to 30 seconds
+                            if manager.is_ready():
+                                break
+                            time.sleep(1)
+                        if not manager.is_ready():
+                            print("ERROR: Manager failed to load within 30 seconds")
+                            continue
+
                     # Send immediately on connection
                     print("[DEBUG] Sending initial CoT batch")
                     try:

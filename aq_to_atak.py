@@ -277,6 +277,25 @@ def get_latest_measurements(api_base, station):
     return values
 
 
+def sanitize_for_xml(text):
+    """Remove/replace Unicode characters that break XML parsing"""
+    if not text:
+        return text
+    # Replace problematic Unicode characters with ASCII equivalents
+    replacements = {
+        'µ': 'u',      # micro symbol
+        '³': '3',      # superscript 3
+        '²': '2',      # superscript 2
+        '°': 'deg',    # degree symbol
+        '→': '->',     # arrow
+        '←': '<-',     # arrow
+    }
+    result = text
+    for char, replacement in replacements.items():
+        result = result.replace(char, replacement)
+    return result
+
+
 def make_cot(config, station, data):
     now = datetime.now(timezone.utc)
     stale_minutes = config.get_int("stale_minutes", 10)
@@ -302,7 +321,10 @@ def make_cot(config, station, data):
         value = measurement.get("value")
         units = measurement.get("units")
         display_name = parameter_names.get(parameter, parameter.replace("_", " ").upper())
+        
+        # Sanitize units for XML
         if units:
+            units = sanitize_for_xml(units)
             remarks_lines.append(f"{display_name}: {value} {units}")
         else:
             remarks_lines.append(f"{display_name}: {value}")
@@ -417,9 +439,6 @@ class StationManager:
                     )
 
                 cot = make_cot(config, station, data)
-                print(f"[DEBUG] CoT XML for {station['location_id']}:")
-                print(cot)
-                print(f"[DEBUG] Sending {len(cot)} bytes")
                 conn.sendall(cot.encode("utf-8"))
                 print(f"CoT sent: openaq.{station['location_id']}")
 
@@ -455,7 +474,6 @@ def main():
     host = manager.get_config().get("cot_host", "0.0.0.0")
     port = manager.get_config().get_int("cot_port", 9000)
 
-    print(f"[DEBUG] Binding to {host}:{port}")
     print(f"Listening on {host}:{port}")
     print("AQTAK v2 ready (loading stations in background)")
 
@@ -463,16 +481,15 @@ def main():
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((host, port))
         server.listen(5)
-        print("[DEBUG] Server listening")
 
         while True:
             try:
                 conn, addr = server.accept()
-                print(f"[DEBUG] ATAK connection from {addr}")
+                print(f"ATAK connection from {addr}")
                 with conn:
                     if not manager.is_ready():
-                        print("[DEBUG] Manager not ready, waiting...")
-                        for _ in range(30):  # Wait up to 30 seconds
+                        print("Waiting for manager to load...")
+                        for _ in range(30):
                             if manager.is_ready():
                                 break
                             time.sleep(1)
@@ -481,24 +498,20 @@ def main():
                             continue
 
                     # Send immediately on connection
-                    print("[DEBUG] Sending initial CoT batch")
                     try:
                         manager.send_all(conn)
-                        print("[DEBUG] Initial CoT sent successfully")
-                    except (BrokenPipeError, ConnectionResetError) as e:
-                        print(f"[DEBUG] Connection closed during initial send: {e}")
+                    except (BrokenPipeError, ConnectionResetError):
+                        print("ATAK disconnected after initial send")
                         continue
                     except Exception as exc:
-                        print(f"[DEBUG] Error on initial send: {exc}")
+                        print(f"Error on initial send: {exc}")
                         continue
 
                     # Then continue polling
                     while True:
                         try:
                             poll_interval = manager.get_config().get_int("poll_interval", 10)
-                            print(f"[DEBUG] Sleeping {poll_interval}s before next poll")
                             time.sleep(poll_interval)
-                            print(f"[DEBUG] Sending periodic CoT batch")
                             manager.send_all(conn)
                         except (BrokenPipeError, ConnectionResetError):
                             print("ATAK disconnected")

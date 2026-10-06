@@ -417,7 +417,9 @@ class StationManager:
                     )
 
                 cot = make_cot(config, station, data)
-                print(f"[DEBUG] Sending CoT for {station['location_id']}, size={len(cot)} bytes")
+                print(f"[DEBUG] CoT XML for {station['location_id']}:")
+                print(cot)
+                print(f"[DEBUG] Sending {len(cot)} bytes")
                 conn.sendall(cot.encode("utf-8"))
                 print(f"CoT sent: openaq.{station['location_id']}")
 

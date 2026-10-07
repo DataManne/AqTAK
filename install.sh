@@ -110,6 +110,7 @@ fi
 mkdir -p "$DATA_DIR" "$TAKY_CONFIG_DIR"
 
 # Taky config (always regenerated to ensure consistency)
+# read_only=true: Taky only broadcasts sensor data; clients cannot send CoT back
 cat > "$TAKY_CONFIG_DIR/taky.conf" <<'TAKY_EOF'
 [taky]
 hostname = aqtak-taky
@@ -118,6 +119,7 @@ bind_ip = 0.0.0.0
 
 [cot_server]
 port = 8087
+read_only = true
 
 [dp_server]
 upload_path = /var/taky/dp-user
@@ -126,7 +128,7 @@ upload_path = /var/taky/dp-user
 enabled = false
 TAKY_EOF
 
-echo "==> Taky config: $TAKY_CONFIG_DIR/taky.conf"
+echo "==> Taky config: $TAKY_CONFIG_DIR/taky.conf (read-only mode: no client CoT accepted)"
 
 # AQTAK config (only write if locations provided or no config exists)
 if [[ -n "$LOCATIONS" || ! -f "$AQTAK_CONF" ]]; then
@@ -195,7 +197,7 @@ echo "==> Starting containers"
     -p "$TAKY_PORT:8087/tcp" \
     -v "$TAKY_CONFIG_DIR/taky.conf:/etc/taky/taky.conf:ro" \
     localhost/aqtak-taky:latest >/dev/null 2>&1
-echo "    Started aqtak-taky (TCP $TAKY_PORT)"
+echo "    Started aqtak-taky (TCP $TAKY_PORT, read-only mode)"
 
 export OPENAQ_API_KEY="$API_KEY"
 "$RUNTIME" run -d \
@@ -238,6 +240,7 @@ Container info:
   Container: aqtak
   Network: $NETWORK_NAME
   Published port: $TAKY_PORT (TCP)
+  Taky mode: Read-only (sensor data only, no client positions shared)
 
 Logs:
   Follow AQTAK:  $RUNTIME logs -f aqtak
@@ -251,6 +254,11 @@ ATAK configuration:
   4. Port: $TAKY_PORT
   5. No SSL
   6. Save
+
+Privacy note:
+  Taky runs in read-only mode: air quality sensor locations are shared with ATAK
+  clients, but ATAK client positions are NOT sent back to the relay. This provides
+  one-way sensor reporting without exposing user locations.
 
 Troubleshooting:
   - Check logs for "Connected to Taky" or error messages

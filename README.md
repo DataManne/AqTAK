@@ -45,6 +45,62 @@ This removes both containers, both images, the network, `data/` and `taky/config
 
 `--api-key`, `--locations`, `--poll-interval` (min 5), `--stale-minutes`, `--callsign-prefix`, `--taky-port`, `--runtime podman|docker`, `--clean`.
 
+## Quick start
+
+After installation, start both containers with:
+
+```bash
+podman start aqtak-taky && podman start aqtak && podman logs -f aqtak-taky & podman logs -f aqtak
+```
+
+Common commands:
+
+```bash
+# Stop both
+podman stop aqtak-taky && podman stop aqtak
+
+# Restart both
+podman restart aqtak-taky && podman restart aqtak
+
+# Check status
+podman ps --filter name=aqtak
+
+# Follow logs only
+podman logs -f aqtak
+```
+
+### Automated startup (GUI or cron)
+
+Save as `~/pods/aqtak/start.sh`:
+
+```bash
+#!/bin/bash
+podman start aqtak-taky && podman start aqtak && sleep 2 && podman logs -f aqtak-taky & podman logs -f aqtak
+```
+
+Make executable:
+
+```bash
+chmod +x ~/pods/aqtak/start.sh
+```
+
+Then run:
+
+```bash
+~/pods/aqtak/start.sh
+```
+
+For a desktop menu entry, save as `~/.local/share/applications/aqtak-start.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=AQTAK Start
+Exec=/home/dataserf/pods/aqtak/start.sh
+Terminal=true
+Icon=network-server
+```
+
 ## Finding location IDs
 
 Browse [explore.openaq.org](https://explore.openaq.org/) or query the API:
@@ -63,7 +119,7 @@ Changes are picked up automatically (`config_reload` seconds).
 | `locations` | none | Comma-separated OpenAQ location IDs |
 | `cot_host` / `cot_port` | `aqtak-taky` / `8087` | Where AQTAK connects |
 | `enable_aqi_colors` | `true` | Colour markers by AQI (see below) |
-| `cot_type` | `a-f-G-E-S` | CoT type used when colours are off, or no AQI pollutant is reported |
+| `cot_type_fallback` | `a-f-G-E-S` | CoT type used when colours are off, or no AQI pollutant is reported |
 | `callsign_prefix` | `AQ` | Callsign is `<prefix> <station name>` |
 | `poll_interval` | `10` | Seconds between updates |
 | `stale_minutes` | `10` | Marker lifetime in ATAK |
@@ -90,6 +146,10 @@ The remarks show the AQI, the pollutant driving it, advice and all raw readings.
 **Masks:** particulates (PM2.5, PM10) can be filtered with an N95/FFP2 mask. Gases (O3, NO2, SO2, CO) are not stopped by ordinary masks. The remarks say which applies when AQI is above 50.
 
 Simplifications: PM, SO2, NO2 and CO use the 24-hour tables and O3 the 8-hour table, applied to the latest reading rather than a rolling average, so values are indicative only. This is not an official or safety-critical AQI.
+
+## Privacy
+
+Taky runs in **read-only mode**: air quality sensor locations are broadcast to ATAK clients, but ATAK client positions are **not** sent back through the relay. This provides one-way sensor reporting without exposing user locations.
 
 ## Troubleshooting
 

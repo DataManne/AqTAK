@@ -17,7 +17,7 @@ mkdir -p ~/pods && cd ~/pods
 git clone https://github.com/DataManne/AqTAK.git aqtak
 cd aqtak
 
-export OPENAQ_API_KEY="your_key"
+export OPENAQ_API_KEY="your_key_keep_airquotes"
 bash install.sh --locations 12345,67890
 ```
 

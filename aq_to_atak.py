@@ -57,7 +57,7 @@ class Config:
             "locations": "",
             "poll_interval": "10",
             "stale_minutes": "10",
-            "cot_type": "a-f-G-E-S",
+            "cot_type_fallback": "a-f-G-E-S",
             "cot_host": "127.0.0.1",
             "cot_port": "8087",
             "callsign_prefix": "AQ",
@@ -66,6 +66,7 @@ class Config:
             "log_level": "INFO",
             "openaq_api": "https://api.openaq.org/v3",
             "enable_aqi_colors": "true",
+            "max_data_age_minutes": "60",
         }
 
     def load(self):
@@ -189,13 +190,15 @@ class StationDB:
         )
         self.conn.commit()
 
-    def save_measurement(self, location_id, parameter, value, units):
+    def save_measurement(self, location_id, parameter, value, units, observed_at=None):
+        if observed_at is None:
+            observed_at = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             """
             INSERT INTO measurements (location_id, observed_at, parameter, value, units)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (location_id, datetime.now(timezone.utc).isoformat(), parameter, value, units),
+            (location_id, observed_at, parameter, value, units),
         )
         self.conn.commit()
 
@@ -258,14 +261,33 @@ def load_stations(api_base, location_ids):
     return stations
 
 
-def get_latest_measurements(api_base, station):
+def get_latest_measurements(api_base, station, config):
+    """Fetch latest measurements, filtering out data older than max_data_age_minutes."""
     results = api_get(api_base, f"/locations/{station['location_id']}/latest").get("results", [])
+    now = datetime.now(timezone.utc)
+    max_age = timedelta(minutes=config.get_int("max_data_age_minutes", 60))
     values = {}
+    
     for item in results:
         sensor = station["sensors"].get(item.get("sensorsId"))
         if not sensor:
             continue
+        
+        # Check data age
+        observed = item.get("dateObserved")
+        if observed:
+            try:
+                obs_time = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+                age = now - obs_time
+                if age > max_age:
+                    age_minutes = int(age.total_seconds() / 60)
+                    print(f"  Skipping {sensor['name']}: data {age_minutes}m old (max {config.get_int('max_data_age_minutes', 60)}m)")
+                    continue
+            except (ValueError, TypeError):
+                print(f"  Warning: could not parse dateObserved for {sensor['name']}")
+        
         values[sensor["name"]] = {"value": item.get("value"), "units": sensor.get("units")}
+    
     print(f"{station['name']} measurements: {values}")
     return values
 
@@ -345,7 +367,7 @@ def make_cot(config, station, data):
     time_string = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     stale_string = stale_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    cot_type = config.get("cot_type", "a-f-G-E-S")
+    cot_type = config.get("cot_type_fallback", "a-f-G-E-S")
     remarks_lines = []
 
     if config.get_bool("enable_aqi_colors", True):
@@ -425,6 +447,7 @@ class StationManager:
                 self.ready = True
             print(f"Loaded {len(stations)} of {len(location_ids)} configured locations")
             print(f"AQI colours: {'enabled' if config.get_bool('enable_aqi_colors') else 'disabled'}")
+            print(f"Max data age: {config.get_int('max_data_age_minutes', 60)} minutes")
         except Exception as exc:
             print(f"ERROR: reload() failed: {exc}")
 
@@ -448,7 +471,10 @@ class StationManager:
             return
         for station in stations:
             try:
-                data = get_latest_measurements(api_base, station)
+                data = get_latest_measurements(api_base, station, config)
+                if not data:
+                    print(f"  No valid measurements for {station['location_id']} (all stale or filtered)")
+                    continue
                 for parameter, m in data.items():
                     db.save_measurement(station["location_id"], parameter, m.get("value"), m.get("units"))
                 cot = make_cot(config, station, data)

@@ -273,34 +273,66 @@ def load_stations(api_base, location_ids):
     return stations
 
 
+def parse_observed_time(item):
+    """Observation time of a /latest result as an aware UTC datetime, or None.
+
+    OpenAQ v3 returns {"datetime": {"utc": "...Z", "local": "..."}}.
+    Older/alternative field names are accepted as fallbacks.
+    """
+    raw = None
+    dt = item.get("datetime")
+    if isinstance(dt, dict):
+        raw = dt.get("utc") or dt.get("local")
+    elif isinstance(dt, str):
+        raw = dt
+    if not raw:
+        raw = item.get("dateObserved") or item.get("date")
+        if isinstance(raw, dict):
+            raw = raw.get("utc") or raw.get("local")
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def get_latest_measurements(api_base, station, config):
-    """Fetch latest measurements, filtering out data older than max_data_age_minutes."""
+    """Fetch latest readings, dropping any older than max_data_age_minutes.
+
+    Readings with no parseable timestamp are also dropped: we cannot prove they are fresh.
+    """
     results = api_get(api_base, f"/locations/{station['location_id']}/latest").get("results", [])
     now = datetime.now(timezone.utc)
-    max_age = timedelta(minutes=config.get_int("max_data_age_minutes", 60))
+    max_minutes = config.get_int("max_data_age_minutes", 60)
+    max_age = timedelta(minutes=max_minutes)
     values = {}
-    
+
     for item in results:
         sensor = station["sensors"].get(item.get("sensorsId"))
         if not sensor:
             continue
-        
-        # Check data age
-        observed = item.get("dateObserved")
-        if observed:
-            try:
-                obs_time = datetime.fromisoformat(observed.replace("Z", "+00:00"))
-                age = now - obs_time
-                if age > max_age:
-                    age_minutes = int(age.total_seconds() / 60)
-                    print(f"  Skipping {sensor['name']}: data {age_minutes}m old (max {config.get_int('max_data_age_minutes', 60)}m)")
-                    continue
-            except (ValueError, TypeError):
-                print(f"  Warning: could not parse dateObserved for {sensor['name']}")
-        
-        values[sensor["name"]] = {"value": item.get("value"), "units": sensor.get("units")}
-    
-    print(f"{station['name']} measurements: {values}")
+
+        observed = parse_observed_time(item)
+        if observed is None:
+            print(f"  Skipping {sensor['name']}: no usable timestamp")
+            continue
+
+        age = now - observed
+        if age > max_age:
+            print(f"  Skipping {sensor['name']}: data {int(age.total_seconds() / 60)}m old (max {max_minutes}m)")
+            continue
+
+        values[sensor["name"]] = {
+            "value": item.get("value"),
+            "units": sensor.get("units"),
+            "observed_at": observed.isoformat(),
+        }
+
+    print(f"{station['name']} measurements: { {k: v['value'] for k, v in values.items()} }")
     return values
 
 
@@ -494,10 +526,12 @@ class StationManager:
             try:
                 data = get_latest_measurements(api_base, station, config)
                 if not data:
-                    print(f"  No valid measurements for {station['location_id']} (all stale or filtered)")
+                    print(f"  No fresh measurements for {station['location_id']}; not sending (marker will expire)")
                     continue
                 for parameter, m in data.items():
-                    db.save_measurement(station["location_id"], parameter, m.get("value"), m.get("units"))
+                    db.save_measurement(
+                        station["location_id"], parameter, m.get("value"), m.get("units"), m.get("observed_at")
+                    )
                 cot = make_cot(config, station, data)
             except Exception as exc:
                 print(f"ERROR updating station {station['location_id']}: {exc}")

@@ -1,6 +1,6 @@
 # AqTAK
 
-OpenAQ air quality readings as Cursor-on-Target markers for ATAK, relayed through a private [Taky](https://github.com/tkuester/taky) server. Containerised for Podman (Docker should also work).
+OpenAQ air quality readings as Cursor-on-Target markers for ATAK, relayed through a private [Taky](https://github.com/tkuester/taky) server. Containerised for Podman (Docker should also work[untested{i personally dont use it}]).
 
 ```
 OpenAQ API -> AQTAK (client) -> aqtak-taky (port 8087) -> ATAK devices

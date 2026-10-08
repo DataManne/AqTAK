@@ -202,6 +202,18 @@ class StationDB:
         )
         self.conn.commit()
 
+    def get_all_station_ids(self):
+        """Get all location IDs currently in the database."""
+        cursor = self.conn.execute("SELECT location_id FROM stations")
+        return set(row[0] for row in cursor.fetchall())
+
+    def cleanup_location(self, location_id):
+        """Remove all data for a location no longer in config."""
+        self.conn.execute("DELETE FROM measurements WHERE location_id = ?", (location_id,))
+        self.conn.execute("DELETE FROM stations WHERE location_id = ?", (location_id,))
+        self.conn.commit()
+        print(f"  Cleaned up location {location_id}: deleted all stations and measurements")
+
     def close(self):
         if self.conn:
             self.conn.close()
@@ -436,6 +448,15 @@ class StationManager:
             db = StationDB(config.get_database_path())
             for station in stations:
                 db.save_station(station)
+
+            # Cleanup: delete data for locations no longer in config
+            db_location_ids = db.get_all_station_ids()
+            config_location_ids = set(location_ids)
+            removed_ids = db_location_ids - config_location_ids
+            if removed_ids:
+                print(f"Cleaning up removed locations: {removed_ids}")
+                for loc_id in removed_ids:
+                    db.cleanup_location(loc_id)
 
             with self.lock:
                 if self.db is not None:
